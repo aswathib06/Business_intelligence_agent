@@ -89,15 +89,34 @@ def clean_probability(df, column="closure_probability"):
 # ---------------------------------------------------
 
 def pipeline_metrics(df):
-    if "deal_value" not in df.columns:
-        return {}
 
-    df["deal_value"] = pd.to_numeric(df["deal_value"], errors="coerce")
-    df["closure_probability"] = pd.to_numeric(df.get("closure_probability", 0), errors="coerce")
+    # Try to detect correct deal value column
+    value_column = None
+    for col in df.columns:
+        if "value" in col:
+            value_column = col
+            break
+
+    if not value_column:
+        return {"Error": "No deal value column found"}
+
+    df[value_column] = pd.to_numeric(df[value_column], errors="coerce")
+
+    prob_column = None
+    for col in df.columns:
+        if "prob" in col:
+            prob_column = col
+            break
+
+    if prob_column:
+        df[prob_column] = pd.to_numeric(df[prob_column], errors="coerce")
+    else:
+        df["temp_prob"] = 1
+        prob_column = "temp_prob"
 
     total_deals = len(df)
-    total_value = df["deal_value"].sum()
-    weighted_pipeline = (df["deal_value"] * df["closure_probability"]).sum()
+    total_value = df[value_column].sum()
+    weighted_pipeline = (df[value_column] * df[prob_column]).sum()
     avg_deal_size = total_value / total_deals if total_deals else 0
 
     return {
@@ -113,14 +132,26 @@ def pipeline_metrics(df):
 # ---------------------------------------------------
 
 def calculate_risk(df):
-    df["deal_value"] = pd.to_numeric(df.get("deal_value", 0), errors="coerce")
-    df["closure_probability"] = pd.to_numeric(df.get("closure_probability", 0), errors="coerce")
 
-    max_value = df["deal_value"].max() if df["deal_value"].max() else 1
+    value_column = next((col for col in df.columns if "value" in col), None)
+    prob_column = next((col for col in df.columns if "prob" in col), None)
+
+    if not value_column:
+        return df
+
+    df[value_column] = pd.to_numeric(df[value_column], errors="coerce")
+
+    if prob_column:
+        df[prob_column] = pd.to_numeric(df[prob_column], errors="coerce")
+    else:
+        df["temp_prob"] = 1
+        prob_column = "temp_prob"
+
+    max_value = df[value_column].max() or 1
 
     df["risk_score"] = (
-        (1 - df["closure_probability"]) * 0.6 +
-        (df["deal_value"] / max_value) * 0.4
+        (1 - df[prob_column]) * 0.6 +
+        (df[value_column] / max_value) * 0.4
     )
 
     return df
