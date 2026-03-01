@@ -4,7 +4,8 @@ import requests
 import json
 from datetime import datetime
 import matplotlib.pyplot as plt
-from openai import OpenAI
+from openai import OpenAI, RateLimitError
+import time
 
 
 # ---------------------------------------------------
@@ -13,12 +14,12 @@ from openai import OpenAI
 
 st.set_page_config(page_title="Founder BI Agent", layout="wide")
 
-OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
-MONDAY_API_KEY = st.secrets["MONDAY_API_KEY"]
-DEALS_BOARD_ID = st.secrets["DEALS_BOARD_ID"]
-WORK_ORDERS_BOARD_ID = st.secrets["WORK_ORDERS_BOARD_ID"]
+OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", None)
+MONDAY_API_KEY = st.secrets.get("MONDAY_API_KEY", None)
+DEALS_BOARD_ID = st.secrets.get("DEALS_BOARD_ID", None)
+WORK_ORDERS_BOARD_ID = st.secrets.get("WORK_ORDERS_BOARD_ID", None)
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 
 # ---------------------------------------------------
@@ -26,6 +27,10 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 # ---------------------------------------------------
 
 def fetch_board_data(board_id):
+    if not MONDAY_API_KEY:
+        st.error("Monday API key not configured.")
+        return pd.DataFrame()
+
     url = "https://api.monday.com/v2"
     headers = {"Authorization": MONDAY_API_KEY}
     query = f"""
@@ -80,31 +85,19 @@ def clean_probability(df, column="closure_probability"):
 
 
 # ---------------------------------------------------
-# TIME UTILITIES
-# ---------------------------------------------------
-
-def filter_this_quarter(df, date_column):
-    df[date_column] = pd.to_datetime(df[date_column], errors="coerce")
-    today = datetime.today()
-    quarter = (today.month - 1) // 3 + 1
-    start_month = 3 * (quarter - 1) + 1
-    start_date = datetime(today.year, start_month, 1)
-
-    return df[df[date_column] >= start_date]
-
-
-# ---------------------------------------------------
 # METRICS ENGINE
 # ---------------------------------------------------
 
 def pipeline_metrics(df):
-    total_deals = len(df)
-    total_value = df["deal_value"].astype(float).sum()
-    weighted_pipeline = (
-        df["deal_value"].astype(float) *
-        df["closure_probability"].astype(float)
-    ).sum()
+    if "deal_value" not in df.columns:
+        return {}
 
+    df["deal_value"] = pd.to_numeric(df["deal_value"], errors="coerce")
+    df["closure_probability"] = pd.to_numeric(df.get("closure_probability", 0), errors="coerce")
+
+    total_deals = len(df)
+    total_value = df["deal_value"].sum()
+    weighted_pipeline = (df["deal_value"] * df["closure_probability"]).sum()
     avg_deal_size = total_value / total_deals if total_deals else 0
 
     return {
@@ -120,22 +113,57 @@ def pipeline_metrics(df):
 # ---------------------------------------------------
 
 def calculate_risk(df):
-    df["deal_value"] = pd.to_numeric(df["deal_value"], errors="coerce")
-    df["closure_probability"] = pd.to_numeric(df["closure_probability"], errors="coerce")
+    df["deal_value"] = pd.to_numeric(df.get("deal_value", 0), errors="coerce")
+    df["closure_probability"] = pd.to_numeric(df.get("closure_probability", 0), errors="coerce")
+
+    max_value = df["deal_value"].max() if df["deal_value"].max() else 1
 
     df["risk_score"] = (
         (1 - df["closure_probability"]) * 0.6 +
-        (df["deal_value"] / df["deal_value"].max()) * 0.4
+        (df["deal_value"] / max_value) * 0.4
     )
 
     return df
 
 
 # ---------------------------------------------------
-# INTENT PARSER (LLM)
+# RULE-BASED PARSER (Fallback)
+# ---------------------------------------------------
+
+def rule_based_parse(query):
+    query = query.lower()
+
+    intent = "pipeline"
+    if "risk" in query:
+        intent = "risk"
+    elif "revenue" in query:
+        intent = "revenue"
+
+    sector = None
+    if "energy" in query:
+        sector = "energy"
+    elif "healthcare" in query:
+        sector = "healthcare"
+    elif "manufacturing" in query:
+        sector = "manufacturing"
+
+    timeframe = "this_quarter" if "quarter" in query else None
+
+    return {
+        "intent": intent,
+        "sector": sector,
+        "timeframe": timeframe
+    }
+
+
+# ---------------------------------------------------
+# INTENT PARSER (LLM SAFE)
 # ---------------------------------------------------
 
 def parse_query(query):
+    if client is None:
+        return rule_based_parse(query)
+
     prompt = f"""
     Extract:
     - intent (pipeline, risk, revenue)
@@ -146,23 +174,42 @@ def parse_query(query):
     Question: {query}
     """
 
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.2
-    )
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2
+        )
 
-    return json.loads(response.choices[0].message.content)
+        return json.loads(response.choices[0].message.content)
+
+    except RateLimitError:
+        st.warning("⚠️ OpenAI rate limit exceeded. Using rule-based parsing.")
+        return rule_based_parse(query)
+
+    except Exception:
+        st.warning("⚠️ AI parsing failed. Using rule-based fallback.")
+        return rule_based_parse(query)
 
 
 # ---------------------------------------------------
-# INSIGHT GENERATOR
+# INSIGHT GENERATOR (SAFE)
 # ---------------------------------------------------
-
-from openai import RateLimitError
-import time
 
 def generate_insight(metrics):
+
+    if client is None:
+        return f"""
+        Summary:
+        Total pipeline value is {metrics.get('Total Pipeline Value', 0)}.
+
+        Risk:
+        Review high value deals with low probability.
+
+        Recommendation:
+        Focus on converting medium-to-high probability deals.
+        """
+
     prompt = f"""
     Generate executive summary using:
     {metrics}
@@ -183,10 +230,11 @@ def generate_insight(metrics):
         return response.choices[0].message.content
 
     except RateLimitError:
-        return "⚠️ AI service temporarily unavailable (rate limit exceeded). Please try again later."
+        return "⚠️ AI service temporarily unavailable. Showing rule-based summary."
 
-    except Exception as e:
-        return f"⚠️ Unexpected error occurred: {str(e)}"
+    except Exception:
+        return "⚠️ AI insight generation failed."
+
 
 # ---------------------------------------------------
 # UI
@@ -200,6 +248,10 @@ if st.button("Run Analysis"):
 
     deals = fetch_board_data(DEALS_BOARD_ID)
     work_orders = fetch_board_data(WORK_ORDERS_BOARD_ID)
+
+    if deals.empty:
+        st.error("No deal data found.")
+        st.stop()
 
     deals = normalize_columns(deals)
     deals = clean_probability(deals)
