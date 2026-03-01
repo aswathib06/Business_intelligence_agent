@@ -10,4 +10,4 @@ def load_data():
     deals = pd.read_excel(deals_path)
     work_orders = pd.read_excel(work_orders_path)
 
-    return deals, work_orders deals, work_orders
+    return deals, work_orders
