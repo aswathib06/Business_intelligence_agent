@@ -1,6 +1,14 @@
 import pandas as pd
 
 def clean_deals(deals):
+    # Remove extra spaces from column names
+    deals.columns = deals.columns.str.strip()
+
+    # Convert to consistent format
+    deals.columns = deals.columns.str.lower()
+
+    return deals
+def clean_deals(deals):
     deals.columns = deals.columns.str.strip()
 
     if "Sector" in deals.columns:
