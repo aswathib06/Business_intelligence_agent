@@ -159,6 +159,9 @@ def parse_query(query):
 # INSIGHT GENERATOR
 # ---------------------------------------------------
 
+from openai import RateLimitError
+import time
+
 def generate_insight(metrics):
     prompt = f"""
     Generate executive summary using:
@@ -170,14 +173,20 @@ def generate_insight(metrics):
     - Recommendation
     """
 
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.3
-    )
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3
+        )
 
-    return response.choices[0].message.content
+        return response.choices[0].message.content
 
+    except RateLimitError:
+        return "⚠️ AI service temporarily unavailable (rate limit exceeded). Please try again later."
+
+    except Exception as e:
+        return f"⚠️ Unexpected error occurred: {str(e)}"
 
 # ---------------------------------------------------
 # UI
